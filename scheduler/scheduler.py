@@ -1,4 +1,5 @@
 import json
+import time
 
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_SERIALIZABLE
@@ -23,8 +24,10 @@ def limit_recursion(max_depth):
 
 class Scheduler:
     _instance = None
+    _rate_limit = 5
 
     def __new__(cls, *args, **kwargs):
+        """ Permorming Singleton """
         if not cls._instance:
             cls._instance = super().__new__(cls, *args, **kwargs)
             # Initialize async Redis connection
@@ -32,17 +35,26 @@ class Scheduler:
         return cls._instance
 
     def _get_redis(self):
+        """ Initialize Redis connection """
         if not self._redis:
             self._redis = redis.Redis(host='localhost', port=6379, db=0)
         return self._redis
 
-    @limit_recursion(3)
+    @limit_recursion(10)
     def get_proxy(self, source_id):
+        """ Get a proxy address from Redis """
         redis = self._get_redis()
         # Retrieve and delete the first proxy address from Redis
         proxy = redis.zpopmax(source_id)
 
         if not proxy:
+            # If we operating second recursion 
+            # it means that redis is empty
+            # if redis is empty we need to wait for some time
+            # for new proxies to be added to redis
+            if self.get_proxy.depth > 1:
+                time.sleep(self._rate_limit)
+
             self.send_batch_to_redis(source_id)
             return self.get_proxy(source_id)
         
@@ -105,5 +117,4 @@ class Scheduler:
         # Store the proxy address in Redis
         priority = proxy_data['priority']
         dumped_data = json.dumps(proxy_data)
-        #redis.rpush(source_id, dumped_data)
         redis.zadd(source_id, {dumped_data: priority})
