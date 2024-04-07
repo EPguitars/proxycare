@@ -35,12 +35,20 @@ class DatabaseConnector:
         if self.connection:
             self.connection.close()
 
-    def execute_query(self, query):
+    def execute_update_query(self, query):
+        if not self.connection:
+            raise RuntimeError("Database connection is not established.")
+        with self.connection.cursor() as cursor:
+            cursor.execute(query)
+            self.connection.commit()
+    
+    def execute_select_query(self, query):
         if not self.connection:
             raise RuntimeError("Database connection is not established.")
         with self.connection.cursor() as cursor:
             cursor.execute(query)
             rows = cursor.fetchall()
+
         return rows
 
     # Implementing the context manager protocol

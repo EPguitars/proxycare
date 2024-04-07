@@ -12,7 +12,7 @@ async def get_proxy(source_id: int, password: str = Depends(verify_access)):
     # request scheduler to get proxy for source
     scheduler = Scheduler()
     print("Getting proxy for source_id:", source_id)
-    return scheduler.get_proxy(source_id)
+    return scheduler.get_proxy(source_id)[0][0]
 
 
 if __name__ == "__main__":
