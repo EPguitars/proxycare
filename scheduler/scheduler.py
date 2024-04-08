@@ -1,8 +1,9 @@
 import json
 import time
+import logging
 
 import psycopg2
-from psycopg2.extensions import ISOLATION_LEVEL_SERIALIZABLE
+from psycopg2.extensions import ISOLATION_LEVEL_REPEATABLE_READ
 import redis
 from scheduler.postgres_connector import DatabaseConnector, dbcredentials
 #from postgres_connector import DatabaseConnector, dbcredentials
@@ -60,12 +61,12 @@ class Scheduler:
         
         return proxy
 
-    def get_proxies_from_db(self, source_id):
+    def get_proxies_from_db(self, source_id, proxies_amount):
         extract_query = f"""SELECT * FROM proxies 
         WHERE blocked = False 
         AND sourceId = {source_id}
-        LIMIT 100"""
-        # ORDER BY priority DESC
+        ORDER BY priority DESC
+        LIMIT {proxies_amount}"""
         
         update_query = f"""UPDATE proxies
         SET blocked = True
@@ -73,13 +74,13 @@ class Scheduler:
             SELECT id FROM proxies 
             WHERE blocked = False 
             AND sourceId = {source_id}
-            LIMIT 100
+            ORDER BY priority DESC
+            LIMIT {proxies_amount}
         )"""
 
         with DatabaseConnector(**dbcredentials) as conn:
             try:
                 # Transaction setup
-                conn.connection.set_isolation_level(ISOLATION_LEVEL_SERIALIZABLE)
                 cursor = conn.connection.cursor()
                 # Get the column names from the table
                 cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name = 'proxies'")
@@ -96,16 +97,16 @@ class Scheduler:
                 return data
             
             except psycopg2.Error as e:
-                print("Error:", e)
+                logging.error("Error while fetching proxies from the database: {1}".format(e))
                 conn.connection.rollback()
                 return []
     
-    def send_batch_to_redis(self, source_id):
+    def send_batch_to_redis(self, source_id, proxy_amount=100):
         # grab batch of proxies from db
         # store in redis
         redis = self._get_redis()
 
-        db_proxies = self.get_proxies_from_db(source_id)
+        db_proxies = self.get_proxies_from_db(source_id, proxy_amount)
         for proxy in db_proxies:
             self.push_proxy_to_redis(source_id, proxy)
 
@@ -118,3 +119,4 @@ class Scheduler:
         priority = proxy_data['priority']
         dumped_data = json.dumps(proxy_data)
         redis.zadd(source_id, {dumped_data: priority})
+

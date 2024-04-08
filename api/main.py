@@ -1,14 +1,14 @@
 import copy
-
+import json
 from fastapi import (FastAPI, status, 
                      Depends, Request)
-from fastapi.routing import APIRoute
 from starlette.concurrency import iterate_in_threadpool
 import uvicorn
 
 from auth import verify_access
 from scheduler.scheduler import Scheduler
-from middlewares import SendMessageMiddleware
+from scheduler.celery_worker import unblock_proxy
+
 
 app = FastAPI()
 
@@ -24,17 +24,16 @@ async def get_proxy(source_id: int, password: str = Depends(verify_access)):
 @app.middleware("http")
 async def add_custom_header(request: Request, call_next):
     response = await call_next(request)
-    response.headers['X-Custom-Header'] = 'My custom value'
 
     if "/get_proxy" == request.url.path and response.status_code == 200:
         # print the body of response
         response_body = [chunk async for chunk in response.body_iterator][0].decode()
+        unblock_proxy.apply_async(args=[json.loads(response_body)])
         response.body_iterator = iterate_in_threadpool(iter(response_body))
-        print("Message sent successfully")
-    
-    print("Custom header added")
+        
     return response
 
 
 if __name__ == "__main__":
+    # start redis sudo service redis-server start
     uvicorn.run(app, host="127.0.0.1", port=8000)
