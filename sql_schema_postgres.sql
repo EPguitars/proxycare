@@ -87,8 +87,9 @@ CREATE TABLE public.proxies (
 	sourceId INTEGER REFERENCES public.sources(id),
 	priority INTEGER,
 	blocked BOOLEAN,
-	provider INTEGER REFERENCES public.providers(id)
-)
+	provider INTEGER REFERENCES public.providers(id),
+	updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 
 CREATE TABLE public.statistics (
@@ -97,3 +98,43 @@ CREATE TABLE public.statistics (
 	counter INTEGER DEFAULT 0,
 	statusId INTEGER REFERENCES public.statuses(statusCode)
 );
+
+
+# Functions and triggers
+
+
+# updating my timestamp automatically
+
+CREATE OR REPLACE FUNCTION update_timestamp_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updatedAt := now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+
+CREATE TRIGGER update_timestamp_trigger
+BEFORE INSERT OR UPDATE ON proxies
+FOR EACH ROW
+EXECUTE FUNCTION update_timestamp_column();
+
+# function for update blocked values
+
+CREATE OR REPLACE FUNCTION update_blocked_status() RETURNS VOID AS $$
+BEGIN
+    UPDATE proxies AS t
+    SET blocked = FALSE
+    FROM (
+        SELECT DISTINCT ON (sourceid)
+               sourceid,
+               updatedat
+        FROM proxies
+        WHERE updatedat < NOW() - INTERVAL '5 minutes'
+        ORDER BY sourceid, updatedat DESC
+    ) AS t2
+    WHERE t.sourceid = t2.sourceid;
+
+
+END;
+$$ LANGUAGE plpgsql;

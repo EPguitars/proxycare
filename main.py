@@ -1,14 +1,14 @@
-import copy
+import subprocess
 import json
 from fastapi import (FastAPI, status, 
                      Depends, Request)
 from starlette.concurrency import iterate_in_threadpool
 import uvicorn
 
-from auth import verify_access
+from api.auth import verify_access
 from scheduler.scheduler import Scheduler
 from scheduler.celery_worker import unblock_proxy
-
+from scheduler.unblock_all_proxies import unblocking_proxy_subprocess
 
 app = FastAPI()
 
@@ -36,4 +36,5 @@ async def add_custom_header(request: Request, call_next):
 
 if __name__ == "__main__":
     # start redis sudo service redis-server start
+    unblocking_proxy_subprocess.start()
     uvicorn.run(app, host="127.0.0.1", port=8000)

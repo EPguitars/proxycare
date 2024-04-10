@@ -6,7 +6,6 @@ import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_REPEATABLE_READ
 import redis
 from scheduler.postgres_connector import DatabaseConnector, dbcredentials
-#from postgres_connector import DatabaseConnector, dbcredentials
 
 # decorator for limiting recursion calls
 def limit_recursion(max_depth):
@@ -114,9 +113,19 @@ class Scheduler:
 
 
     def push_proxy_to_redis(self, source_id, proxy_data):
+        """ Function for adding fresh proxy to Redis """
+        # Get connection to Redis
         redis = self._get_redis()
+        
         # Store the proxy address in Redis
         priority = proxy_data['priority']
+        
+        # need to remove updatedAt field 
+        # because it is not serializable
+        # and we actually don't need it
+        del proxy_data["updatedat"]
+        # Dump json to string
+        # and add to Redis
         dumped_data = json.dumps(proxy_data)
         redis.zadd(source_id, {dumped_data: priority})
 
