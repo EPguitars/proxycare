@@ -4,6 +4,7 @@ from fastapi import (FastAPI, status,
                      Depends, Request)
 from starlette.concurrency import iterate_in_threadpool
 import uvicorn
+from pydantic import BaseModel
 
 from api.auth import verify_access
 from scheduler.scheduler import Scheduler
@@ -13,12 +14,28 @@ from scheduler.unblock_all_proxies import unblocking_proxy_subprocess
 app = FastAPI()
 
 
+class Report(BaseModel):
+    proxy_id: int
+    status: str
+    error: str
+
+
+
 @app.get("/get_proxy", status_code=status.HTTP_200_OK)
 async def get_proxy(source_id: int, password: str = Depends(verify_access)):
     # request scheduler to get proxy for source
     scheduler = Scheduler()
     
     return scheduler.get_proxy(source_id)[0][0]
+
+
+@app.post("/send_report", status_code=status.HTTP_200_OK)
+async def send_report(report: Report , password: str = Depends(verify_access)):
+    # send report to scheduler
+    report = await report
+    scheduler = Scheduler()
+
+    return {"message": "Report was recieved successfully."}
 
 
 @app.middleware("http")
