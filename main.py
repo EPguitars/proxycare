@@ -34,7 +34,7 @@ async def send_report(report: Report , password: str = Depends(verify_access)):
     # send report to scheduler
     report = await report
     scheduler = Scheduler()
-
+    
     return {"message": "Report was recieved successfully."}
 
 
