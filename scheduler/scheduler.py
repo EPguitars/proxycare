@@ -27,7 +27,7 @@ class Scheduler:
     _rate_limit = 5
 
     def __new__(cls, *args, **kwargs):
-        """ Permorming Singleton """
+        """ Performing Singleton """
         if not cls._instance:
             cls._instance = super().__new__(cls, *args, **kwargs)
             # Initialize async Redis connection

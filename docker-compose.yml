@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  # FastAPI application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - proxy-network
+
+  # Celery worker
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A scheduler.celery_worker.celery worker --loglevel=info
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - proxy-network
+
+  # Celery beat for scheduled tasks
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A scheduler.celery_worker.celery beat --loglevel=info
+    volumes:
+      - .:/app
+    depends_on:
+      - postgres
+      - redis
+      - celery_worker
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - proxy-network
+
+  # PostgreSQL database
+  postgres:
+    image: postgres:14
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql_schema_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      - POSTGRES_USER=${user}
+      - POSTGRES_PASSWORD=${password}
+      - POSTGRES_DB=${dbname}
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - proxy-network
+
+  # Redis for Celery broker
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - proxy-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  proxy-network:
+    driver: bridge 

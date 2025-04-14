@@ -22,7 +22,7 @@ class Report(BaseModel):
 
 
 @app.get("/get_proxy", status_code=status.HTTP_200_OK)
-async def get_proxy(source_id: int, password: str = Depends(verify_access)):
+async def get_proxy(source_id: int): # return when done - , password: str = Depends(verify_access)
     # request scheduler to get proxy for source
     scheduler = Scheduler()
     
