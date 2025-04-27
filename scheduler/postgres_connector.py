@@ -5,12 +5,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Get database connection parameters from environment variables
 dbcredentials = {
-    "dbname": os.getenv("dbname"),
-    "user": os.getenv("user"),
-    "password": os.getenv("password"),
-    "host": os.getenv("host"),
-    "port": os.getenv("port"),
+    "dbname": os.getenv("dbname", "ProxyManager"),
+    "user": os.getenv("user", "postgres"),
+    "password": os.getenv("password", "holocron2"),
+    "host": os.getenv("host", "postgres"),  # Use 'postgres' as default in Docker
+    "port": os.getenv("port", "5432")
 }
 
 class DatabaseConnector:

@@ -18,7 +18,23 @@ celery_app = Celery('scheduler', broker=celery_broker)
 
 @celery_app.task
 def unblock_proxy(proxy_dumped):
-    proxy = json.loads(proxy_dumped)
+    """
+    Unblock a proxy after it has been used.
+    
+    Args:
+        proxy_dumped: Either a JSON string or a dictionary containing proxy data
+    """
+    # Check if proxy_dumped is already a dict or needs to be parsed
+    if isinstance(proxy_dumped, dict):
+        proxy = proxy_dumped
+    else:
+        try:
+            proxy = json.loads(proxy_dumped)
+        except (json.JSONDecodeError, TypeError):
+            # Log the error and return
+            print(f"Error decoding proxy data: {proxy_dumped}")
+            return
+    
     proxy_id = str(proxy["id"])
     
     with DatabaseConnector(**dbcredentials) as db:

@@ -100,10 +100,10 @@ CREATE TABLE public.statistics (
 );
 
 
-# Functions and triggers
+-- Functions and triggers
 
 
-# updating my timestamp automatically
+-- updating my timestamp automatically
 
 CREATE OR REPLACE FUNCTION update_timestamp_column()
 RETURNS TRIGGER AS $$
@@ -119,7 +119,7 @@ BEFORE INSERT OR UPDATE ON proxies
 FOR EACH ROW
 EXECUTE FUNCTION update_timestamp_column();
 
-# function for update blocked values
+--  function for update blocked values
 
 CREATE OR REPLACE FUNCTION update_blocked_status() RETURNS VOID AS $$
 BEGIN
