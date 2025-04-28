@@ -465,6 +465,8 @@ async def websocket_proxy_multi(
     Expects a JSON message {"action":"start","source_ids":[...]}
     Requires authentication token in query param or headers.
     """
+    print(dict(websocket.headers))
+    print("=====================")
     try:
         await websocket.accept()
         
