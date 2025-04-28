@@ -458,8 +458,7 @@ async def load_proxies_for_sources(source_ids: list) -> list:
 
 @router.websocket("/ws/proxy_multi")
 async def websocket_proxy_multi(
-    websocket: WebSocket, token: dict = Depends(check_websocket_token)
-):
+    websocket: WebSocket):
     """
     WS endpoint for multi-source proxy delivery and reporting.
     Expects a JSON message {"action":"start","source_ids":[...]}
