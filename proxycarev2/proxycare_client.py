@@ -460,7 +460,7 @@ async def main():
     api_key = os.environ.get("SECRET")
     
     # Create client with sources 1 and 2
-    client = ProxyClient("ws://localhost:8000", ["1", "2"], api_key=api_key)
+    client = ProxyClient("ws://66.45.254.69:8000", ["1"], api_key=api_key)
     
     # Start the background connection
     client.start()
