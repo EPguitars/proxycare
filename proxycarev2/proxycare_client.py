@@ -1,14 +1,77 @@
+import os
 import asyncio
 import json
+import time
 import logging
+import base64
 from typing import List, Dict, Optional, Any
+
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import websockets
 from websockets.exceptions import ConnectionClosed
-import time
-import os
+
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+def get_encryption_key(secret_key: str) -> bytes:
+    """
+    Derive a Fernet encryption key from the secret key.
+    Uses PBKDF2 with a static salt (not ideal for high security,
+    but consistent across app restarts).
+    """
+    # Use a static salt - this means the same secret produces the same key
+    # For higher security, use a stored salt, but this works for our use case
+    salt = b'proxycare_static_salt_value'
+    
+    # Generate a key using PBKDF2
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+    )
+    
+    key = base64.urlsafe_b64encode(kdf.derive(secret_key.encode()))
+    return key
+
+def decrypt_proxy(proxy_data: dict, secret: str) -> dict:
+    """
+    Decrypt encrypted proxy fields.
+    Returns a new dict with decrypted fields.
+    """
+    if not proxy_data.get('_encrypted', False):
+        # If not encrypted, return as is
+        return proxy_data
+    
+    try:
+        # Create a new dictionary to hold the result
+        decrypted_data = proxy_data.copy()
+        
+        # Generate key from secret
+        key = get_encryption_key(secret)
+        f = Fernet(key)
+        
+        # Decrypt the proxy field
+        if 'proxy' in decrypted_data and decrypted_data['proxy']:
+            proxy_bytes = decrypted_data['proxy'].encode()
+            decrypted_data['proxy'] = f.decrypt(proxy_bytes).decode()
+        
+        # Remove the encryption flag
+        if '_encrypted' in decrypted_data:
+            del decrypted_data['_encrypted']
+            
+        return decrypted_data
+    except Exception as e:
+        # On decryption error, return original but remove encryption flag
+        print(f"Decryption error: {e}")
+        if '_encrypted' in proxy_data:
+            proxy_data = proxy_data.copy()
+            del proxy_data['_encrypted']
+        return proxy_data 
+
 
 class ProxyClient:
     """
@@ -21,7 +84,7 @@ class ProxyClient:
         self.source_ids = source_ids
         self.api_key = api_key  # Store the API key for authentication
         self.reconnect_delay = reconnect_delay
-        
+        self.origin = "http://localhost"
         # Store proxies by source with tracking information
         self.proxies_by_source: Dict[str, List[Dict]] = {sid: [] for sid in source_ids}
         
@@ -38,14 +101,8 @@ class ProxyClient:
         self._availability_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
 
-        # Determine WebSocket endpoint and optional start message
-        if len(self.source_ids) == 1:
-            sid = self.source_ids[0]
-            self.ws_url = f"{self.base_url}/ws/proxy/{sid}?token={self.api_key}"
-            self._start_message = None
-        else:
-            self.ws_url = f"{self.base_url}/ws/proxy_multi?token={self.api_key}"
-            self._start_message = {"action": "start", "source_ids": self.source_ids}
+        self.ws_url = f"{self.base_url}/ws/proxy_multi?token={self.api_key}"
+        self._start_message = {"action": "start", "source_ids": self.source_ids}
 
     def start(self):
         """Start the background client tasks."""
@@ -159,8 +216,10 @@ class ProxyClient:
                 
                 # Sort by priority (highest first) and return the top one
                 available_proxies.sort(key=lambda p: p.get('priority', 0), reverse=True)
-                proxy = available_proxies[0]
-                
+                encrypted_proxy = available_proxies[0]
+                # Decrypt the proxy
+                secret = os.environ.get("SECRET", "")
+                proxy = decrypt_proxy(encrypted_proxy, secret)
                 # Mark this proxy as in use
                 proxy_id = proxy.get('id')
                 usage_interval = proxy.get('usage_interval', 30)
@@ -326,18 +385,30 @@ class ProxyClient:
         return result
 
     async def _run(self):
-        """Main client loop."""
-        logger.info(f"Starting ProxyCare client for sources: {self.source_ids}")
+        """Background connection and reconnection loop."""
         while not self._stop_event.is_set():
             try:
-                # Connect to WebSocket server
-                logger.info(f"Connecting to {self.ws_url}...")
-                async with websockets.connect(self.ws_url) as ws:
+                # Define custom headers including Origin
+                headers = {
+                    "Origin": self.origin,
+                    "Authorization": f"Bearer {self.api_key}"
+                }
+                logger.info(f"Connecting to {self.ws_url}")
+                
+                # Add ping options to detect disconnection faster
+                async with websockets.connect(
+                    self.ws_url, 
+                    extra_headers=headers,
+                    ping_interval=30,
+                    ping_timeout=10,
+                    close_timeout=5
+                ) as ws:
                     logger.info("Connected to WebSocket server")
                     
                     # Send start message if needed
                     if self._start_message:
                         await ws.send(json.dumps(self._start_message))
+                        logger.info(f"Sent start message: {self._start_message}")
 
                     # Create tasks
                     receiver = asyncio.create_task(self._receiver(ws))
@@ -347,6 +418,7 @@ class ProxyClient:
                     # Request initial proxies
                     await ws.send(json.dumps({"action": "request_proxy"}))
 
+                    # Wait for any task to complete
                     done, pending = await asyncio.wait(
                         {receiver, sender, stopper},
                         return_when=asyncio.FIRST_COMPLETED
@@ -355,15 +427,31 @@ class ProxyClient:
                     # Cancel pending tasks
                     for task in pending:
                         task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    
                     # If stop_event triggered, break loop
                     if stopper in done:
+                        logger.info("Stop event received, terminating connection")
                         break
 
+            except websockets.exceptions.ConnectionClosedError as e:
+                logger.warning(f"Connection closed with code {e.code}: {e.reason}")
+                
+            except websockets.exceptions.ConnectionClosedOK:
+                logger.info("Connection closed normally")
+                
             except Exception as e:
                 logger.error(f"Connection error: {e}")
-            finally:
-                # Avoid busy reconnection
+                
+            # Only reconnect if we're not stopping
+            if not self._stop_event.is_set():
+                logger.info(f"Will reconnect in {self.reconnect_delay} seconds")
                 await asyncio.sleep(self.reconnect_delay)
+            else:
+                break
 
     async def _receiver(self, ws: websockets.WebSocketClientProtocol):
         """Receive loop: handles incoming messages and updates proxies."""

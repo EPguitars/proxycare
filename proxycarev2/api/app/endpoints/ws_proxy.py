@@ -41,45 +41,108 @@ class ConnectionManager:
     """
     def __init__(self):
         self.active_connections: Dict[str, List[WebSocket]] = defaultdict(list)
+        self.connection_states: Dict[int, str] = {}  # Track WebSocket states by id
+        self._locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def accept_and_connect(self, websocket: WebSocket, key: str):
         """Accept the WebSocket connection and add it to active connections"""
-        await websocket.accept()
-        self.connect(websocket, key)
+        try:
+            await websocket.accept()
+            self.connect(websocket, key)
+            return True
+        except Exception as e:
+            logger.error(f"Error accepting connection: {e}")
+            return False
 
     def connect(self, websocket: WebSocket, key: str):
         """Add a connected WebSocket to the active connections for a key"""
+        ws_id = id(websocket)
         self.active_connections[key].append(websocket)
-        logger.info(f"Client connected to {key}. Total connections: {len(self.active_connections[key])}")
+        self.connection_states[ws_id] = "connected"
+        logger.info(f"Client {ws_id} connected to {key}. Total connections: {len(self.active_connections[key])}")
 
     def disconnect(self, websocket: WebSocket, key: str):
         """Remove a disconnected WebSocket"""
+        ws_id = id(websocket)
         conns = self.active_connections.get(key, [])
         if websocket in conns:
             conns.remove(websocket)
-            logger.info(f"Client disconnected from {key}. Remaining: {len(conns)}")
+            if ws_id in self.connection_states:
+                del self.connection_states[ws_id]
+            logger.info(f"Client {ws_id} disconnected from {key}. Remaining: {len(conns)}")
             
             # Clean up empty lists
             if not conns:
                 del self.active_connections[key]
 
-    async def send_json(self, websocket: WebSocket, message: dict):
-        """Send a JSON message to a WebSocket"""
+    def is_connected(self, websocket: WebSocket) -> bool:
+        """Check if a WebSocket is connected and in a valid state"""
         try:
-            # Check if the WebSocket is still connected before sending
-            if websocket.client_state == WebSocketState.CONNECTED:
+            # First check our connection state tracker
+            ws_id = id(websocket)
+            if self.connection_states.get(ws_id) != "connected":
+                return False
+                
+            # Then check the actual WebSocket state
+            return websocket.client_state == WebSocketState.CONNECTED
+        except Exception:
+            return False
+
+    async def send_json(self, websocket: WebSocket, message: dict):
+        """Safely send a JSON message to a WebSocket"""
+        ws_id = id(websocket)
+        
+        try:
+            # Only try to send if socket is connected
+            if self.is_connected(websocket):
                 await websocket.send_json(message)
+                return True
+            else:
+                # Socket is not connected but in our registry
+                if ws_id in self.connection_states:
+                    logger.debug(f"Cannot send to {ws_id} - not connected (state: {websocket.client_state})")
+                    # Update our tracking
+                    self.connection_states[ws_id] = "disconnected"
+                return False
         except WebSocketDisconnect:
+            # Mark as disconnected
+            self.connection_states[ws_id] = "disconnected"
             # Clean up if client disconnects
             self.disconnect(websocket, message.get("key", ""))
+            return False
+        except RuntimeError as e:
+            # Handle "Cannot call 'send' once a close message has been sent"
+            if "close message has been sent" in str(e):
+                logger.debug(f"Cannot send to {ws_id} - socket is closing")
+                self.connection_states[ws_id] = "closing"
+                self.disconnect(websocket, message.get("key", ""))
+            else:
+                logger.error(f"Runtime error sending message: {e}")
+            return False
         except Exception as e:
             # Log the error but don't propagate it
             logger.error(f"Error sending message: {e}")
+            return False
 
     async def broadcast(self, message: dict, key: str):
         """Broadcast a message to all connected clients for a specific key"""
-        for connection in self.active_connections.get(key, []):
-            await self.send_json(connection, message)
+        # Use a copy of the list to avoid modification during iteration
+        async with self._locks[key]:
+            connections = list(self.active_connections.get(key, []))
+        
+        # Track which connections failed
+        failed_connections = []
+        
+        for connection in connections:
+            success = await self.send_json(connection, message)
+            if not success:
+                failed_connections.append(connection)
+        
+        # Clean up failed connections
+        if failed_connections:
+            async with self._locks[key]:
+                for connection in failed_connections:
+                    self.disconnect(connection, key)
 
 # Create a manager instance
 manager = ConnectionManager()
@@ -128,10 +191,12 @@ async def handle_incoming(ws: WebSocket, key: str) -> bool:
     Returns False if the WebSocket is closed, True otherwise.
     """
     # First check if the WebSocket is still connected
-    if ws.client_state != WebSocketState.CONNECTED:
+    if not manager.is_connected(ws):
+        logger.debug(f"Skipping message handling - client {id(ws)} not connected")
         return False
     
     try:
+        # Use a short timeout to avoid blocking too long
         msg = await asyncio.wait_for(ws.receive_json(), timeout=0.1)
         action = msg.get("action")
         
@@ -140,8 +205,8 @@ async def handle_incoming(ws: WebSocket, key: str) -> bool:
             code = msg.get("status_code")
             success, error_msg = await save_proxy_report(pid, code)
             
-            # Check if the WebSocket is still open before sending
-            if ws.client_state == WebSocketState.CONNECTED:
+            # Check connection state before sending response
+            if manager.is_connected(ws):
                 await manager.send_json(ws, {
                     "action": "report_acknowledged", 
                     "proxy_id": pid, 
@@ -188,23 +253,28 @@ async def handle_incoming(ws: WebSocket, key: str) -> bool:
                                     "key": multi_key
                                 })
         
-        # extend for other inbound actions
-        return True
+        elif action == "request_proxy":
+            # Client wants to refresh their proxy list
+            return True
+            
     except asyncio.TimeoutError:
-        # no message, continue
+        # This is normal - no messages received within timeout
         return True
     except WebSocketDisconnect:
+        logger.info(f"Client {id(ws)} disconnected during receive")
         return False
+    except RuntimeError as e:
+        if "not connected" in str(e) or "accept" in str(e):
+            logger.debug(f"WebSocket {id(ws)} is not in a valid state: {e}")
+            return False
+        else:
+            logger.error(f"Runtime error handling incoming message: {e}")
+            return True
     except Exception as e:
         logger.error(f"Error handling incoming message: {e}")
-        # Only try to notify client if the connection is still open
-        if ws.client_state == WebSocketState.CONNECTED:
-            try:
-                await manager.send_json(ws, {"action": "error", "message": f"Error processing message: {str(e)}"})
-            except Exception:
-                # Ignore errors when trying to send error messages
-                pass
-        return ws.client_state == WebSocketState.CONNECTED
+        return True
+        
+    return True
 
 async def multi_source_proxy_provider(
     websocket: WebSocket,
@@ -222,21 +292,19 @@ async def multi_source_proxy_provider(
     if already_accepted:
         manager.connect(websocket, key)
     else:
-        await manager.accept_and_connect(websocket, key)
+        success = await manager.accept_and_connect(websocket, key)
+        if not success:
+            logger.error(f"Failed to accept connection for {key}")
+            return
     
     try:
         idx = 0
-        while True:
-            # Check if the WebSocket is still connected
-            if websocket.client_state != WebSocketState.CONNECTED:
-                logger.info(f"WebSocket disconnected, exiting provider loop for {key}")
-                break
-                
+        while manager.is_connected(websocket):
             # Process any reports, exit loop if WebSocket is closed
             if not await handle_incoming(websocket, key):
                 logger.info(f"WebSocket closed during message handling for {key}")
                 break
-
+                
             # Then dispatch next proxy
             try:
                 for sid in source_ids:
@@ -245,7 +313,7 @@ async def multi_source_proxy_provider(
                         proxy = pool.popleft()
                         
                         # Check connection again before sending
-                        if websocket.client_state != WebSocketState.CONNECTED:
+                        if not manager.is_connected(websocket):
                             # Put the proxy back and exit
                             pool.appendleft(proxy)
                             return
@@ -271,7 +339,7 @@ async def multi_source_proxy_provider(
                         break
                 else:
                     # No proxies available in any source
-                    if websocket.client_state == WebSocketState.CONNECTED:
+                    if manager.is_connected(websocket):
                         await manager.send_json(websocket, {"action": "waiting", "message": "No proxies available, waiting...", "key": key})
                     await asyncio.sleep(1)
             except WebSocketDisconnect:
@@ -279,7 +347,7 @@ async def multi_source_proxy_provider(
                 break
             except Exception as e:
                 logger.error(f"Error dispatching proxy: {e}")
-                if websocket.client_state != WebSocketState.CONNECTED:
+                if not manager.is_connected(websocket):
                     break
     
     except WebSocketDisconnect:
@@ -289,8 +357,13 @@ async def multi_source_proxy_provider(
         logger.error(f"Error in multi_source_proxy_provider: {e}")
         try:
             # Only try to send an error if the WebSocket is still connected
-            if websocket.client_state == WebSocketState.CONNECTED:
-                await manager.send_json(websocket, {"action": "error", "message": f"Server error: {e}", "key": key})
+            if manager.is_connected(websocket):
+                await manager.send_json(websocket, {
+                    "action": "error", 
+                    "message": f"Server error: {e}", 
+                    "key": key
+                })
+                # Close properly
                 await websocket.close(code=1011)
         except Exception:
             # Ignore errors when trying to send error messages
@@ -318,7 +391,7 @@ async def proxy_producer(websocket: WebSocket, source_id: str, already_accepted:
     try:
         while True:
             # Check if the WebSocket is still connected
-            if websocket.client_state != WebSocketState.CONNECTED:
+            if not manager.is_connected(websocket):
                 logger.info(f"WebSocket disconnected, exiting producer loop for {key}")
                 break
                 
@@ -333,7 +406,7 @@ async def proxy_producer(websocket: WebSocket, source_id: str, already_accepted:
                     proxy = pool.popleft()
                     
                     # Check connection again before sending
-                    if websocket.client_state != WebSocketState.CONNECTED:
+                    if not manager.is_connected(websocket):
                         # Put the proxy back and exit
                         pool.appendleft(proxy)
                         return
@@ -355,7 +428,7 @@ async def proxy_producer(websocket: WebSocket, source_id: str, already_accepted:
                     )
                 else:
                     # No proxies available
-                    if websocket.client_state == WebSocketState.CONNECTED:
+                    if manager.is_connected(websocket):
                         await manager.send_json(websocket, {"action": "waiting", "message": "No proxies available, waiting...", "key": key})
                     await asyncio.sleep(1)
             except WebSocketDisconnect:
@@ -363,7 +436,7 @@ async def proxy_producer(websocket: WebSocket, source_id: str, already_accepted:
                 break
             except Exception as e:
                 logger.error(f"Error dispatching proxy: {e}")
-                if websocket.client_state != WebSocketState.CONNECTED:
+                if not manager.is_connected(websocket):
                     break
     
     except WebSocketDisconnect:
@@ -373,7 +446,7 @@ async def proxy_producer(websocket: WebSocket, source_id: str, already_accepted:
         logger.error(f"Error in proxy_producer: {e}")
         try:
             # Only try to send an error if the WebSocket is still connected
-            if websocket.client_state == WebSocketState.CONNECTED:
+            if manager.is_connected(websocket):
                 await manager.send_json(websocket, {"action": "error", "message": f"Server error: {e}", "key": key})
                 await websocket.close(code=1011)
         except Exception:
@@ -465,8 +538,7 @@ async def websocket_proxy_multi(
     Expects a JSON message {"action":"start","source_ids":[...]}
     Requires authentication token in query param or headers.
     """
-    print(dict(websocket.headers))
-    print("=====================")
+    
     try:
         await websocket.accept()
         
@@ -532,5 +604,5 @@ async def websocket_proxies(websocket: WebSocket):
         logger.info(f"Client disconnected")
     except Exception as e:
         logger.error(f"Error in WebSocket connection: {str(e)}")
-        if websocket.client_state != WebSocketState.CONNECTED:
+        if not manager.is_connected(websocket):
             await websocket.close(code=1011, reason=f"Error: {str(e)}")
